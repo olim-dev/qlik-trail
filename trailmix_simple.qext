@@ -1,0 +1,9 @@
+{
+  "name": "Qlik Trail - Record & Replay",
+  "description": "Qlik Extension to record and replay selections and share them with others",
+  "type": "visualization",
+  "version": "1.0.0",
+  "author": "OIM",
+  "icon": "history",
+  "license": "MIT"
+}
