@@ -63,7 +63,7 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
              .sort(function(a,b){ return (a.seq||0)-(b.seq||0); });
   }
 
-  // NEW: find which group a step belongs to
+  // find which group a step belongs to
   function stepGroupOf(tr, stepId){
     var found = null;
     Object.keys(tr.groups||{}).some(function(gid){
@@ -71,9 +71,9 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
       if (mem.indexOf(stepId) !== -1){ found = gid; return true; }
       return false;
     });
-    return found; // null => ungrouped
+    return found; 
   }
-  // NEW: move a step to a group (or ungrouped when gid===null or '__ungrouped')
+  // move a step to a group
   function moveStepToGroup(tr, stepId, gid){
     // remove from all groups first
     Object.keys(tr.groups||{}).forEach(function(g){
@@ -86,6 +86,17 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
         tr.groups[gid].members.push(stepId);
       }
     }
+  }
+
+  // resequence only the ids in the current list so their relative order changes without affecting others
+  function resequenceList(tr, ids){
+    var nodeById = {};
+    allNodes(tr).forEach(function(n){ nodeById[n.id]=n; });
+    var existing = ids.map(function(id){ return (nodeById[id] && nodeById[id].seq) || 0; }).filter(function(x){return x>0;});
+    var base = existing.length ? Math.min.apply(null, existing) : (maxSeq(tr)+1);
+    ids.forEach(function(id, idx){
+      if(nodeById[id]) nodeById[id].seq = base + idx;
+    });
   }
 
   // selection capture / replay
@@ -181,7 +192,7 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
     definition: props,
     paint: function($el, layout){
       var appId = app.id;
-      var key = 'qliktrail-pro:'+appId;
+      var key = 'qliktrail:'+appId;
 
       if(!$el[0].init){
         $el.empty();
@@ -209,7 +220,7 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
         body.append(left,right);
         root.append(tb, body);
         $el.append(root);
-        $el[0].init = { tb:tb, left:left, right:right, active:null, filter:'', autoOn:false, lastSig:'', replayQuietUntil:0 };
+        $el[0].init = { tb:tb, left:left, right:right, active:null, filter:'', autoOn:false, lastSig:'', replayQuietUntil:0, dragId:null };
       }
 
       var ui = $el[0].init;
@@ -230,6 +241,52 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
         sel.off('change').on('change', function(){ ui.filter=$(this).val(); renderLeft(); renderRight(); });
       }
 
+      // helper to wire drag & drop to a list container
+      function wireDnD(list, getCurrentIds){
+        // drag start
+        list.on('dragstart', '.tmp-node', function(e){
+          ui.dragId = $(this).data('id');
+          try{ e.originalEvent.dataTransfer.effectAllowed = 'move'; }catch(_) {}
+          $(this).addClass('tmp-drop');
+        });
+        // drag over target row
+        list.on('dragover', '.tmp-node', function(e){
+          e.preventDefault();
+          try{ e.originalEvent.dataTransfer.dropEffect = 'move'; }catch(_) {}
+          $(this).addClass('dragover');
+        });
+        list.on('dragleave', '.tmp-node', function(){
+          $(this).removeClass('dragover');
+        });
+        // drop on target row => move source before target
+        list.on('drop', '.tmp-node', function(e){
+          e.preventDefault();
+          var targetId = $(this).data('id');
+          $(this).removeClass('dragover');
+          list.find('.tmp-node').removeClass('tmp-drop');
+
+          if(!ui.dragId || ui.dragId === targetId) return;
+
+          // build current order from DOM
+          var ids = getCurrentIds();
+          var from = ids.indexOf(ui.dragId);
+          var to   = ids.indexOf(targetId);
+          if(from < 0 || to < 0) return;
+
+          // move source before target
+          ids.splice(to, 0, ids.splice(from,1)[0]);
+
+          resequenceList(trail, ids);
+          saveLocal(key, trail);
+          renderLeft(); // keeps same group open; updates counts and order
+        });
+        // drag end cleanup
+        list.on('dragend', '.tmp-node', function(){
+          list.find('.tmp-node').removeClass('dragover tmp-drop');
+          ui.dragId = null;
+        });
+      }
+
       function renderLeft(){
         ui.left.empty();
 
@@ -240,14 +297,18 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
           ui.left.append(hd);
           hd.on('click', function(){ var sel=ui.tb.find('[data-a="group"]'); sel.val(openUng?'':'__ungrouped').trigger('change'); });
           if(openUng){
-            var list=$('<div class="tmp-list"></div>');
+            var list=$('<div class="tmp-list" data-scope="ungrouped"></div>');
             membersBySeq(trail, ungroupedIds(trail)).forEach(function(n){
-              var row=$('<div class="tmp-node" data-id="'+n.id+'"><span>'+(n.name||n.id)+'</span><div class="tmp-row-actions"><button class="tmp-copy">⧉</button><button class="tmp-trash">🗑</button></div></div>');
+              var row=$('<div class="tmp-node" draggable="true" data-id="'+n.id+'"><span>'+(n.name||n.id)+'</span><div class="tmp-row-actions"><button class="tmp-copy">⧉</button><button class="tmp-trash">🗑</button></div></div>');
               row.toggleClass('active', ui.active===n.id);
               row.on('click', function(){ ui.active=n.id; renderLeft(); renderRight(); });
               row.find('.tmp-copy').on('click', function(ev){ ev.stopPropagation(); var dup=deepClone(n); dup.id=uid(); dup.seq=maxSeq(trail)+1; addChild(trail,null,dup); saveLocal(key,trail); renderLeft(); });
               row.find('.tmp-trash').on('click', function(ev){ ev.stopPropagation(); removeNode(trail,n.id); Object.keys(trail.groups||{}).forEach(function(g){ var m=trail.groups[g].members||[]; trail.groups[g].members=m.filter(function(x){return x!==n.id;}); }); saveLocal(key,trail); if(ui.active===n.id) ui.active=null; renderLeft(); renderRight(); });
               list.append(row);
+            });
+            // enable DnD sorting for ungrouped
+            wireDnD(list, function(){
+              return list.find('.tmp-node').map(function(){ return $(this).data('id'); }).get();
             });
             ui.left.append(list);
           }
@@ -264,15 +325,19 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
           hd.on('click', function(){ ui.tb.find('[data-a="group"]').val(open?'':gid).trigger('change'); });
 
           if(open){
-            var list=$('<div class="tmp-list"></div>');
+            var list=$('<div class="tmp-list" data-scope="group"></div>');
             membersBySeq(trail, g.members||[]).forEach(function(n){
-              var row=$('<div class="tmp-node" data-id="'+n.id+'"><span>'+(n.name||n.id)+'</span><div class="tmp-row-actions"><button class="tmp-ungroup">Ungroup</button><button class="tmp-copy">⧉</button><button class="tmp-trash">🗑</button></div></div>');
+              var row=$('<div class="tmp-node" draggable="true" data-id="'+n.id+'"><span>'+(n.name||n.id)+'</span><div class="tmp-row-actions"><button class="tmp-ungroup">Ungroup</button><button class="tmp-copy">⧉</button><button class="tmp-trash">🗑</button></div></div>');
               row.toggleClass('active', ui.active===n.id);
               row.on('click', function(){ ui.active=n.id; renderLeft(); renderRight(); });
               row.find('.tmp-ungroup').on('click', function(ev){ ev.stopPropagation(); g.members=(g.members||[]).filter(function(x){return x!==n.id;}); saveLocal(key,trail); renderLeft(); });
               row.find('.tmp-copy').on('click', function(ev){ ev.stopPropagation(); var dup=deepClone(n); dup.id=uid(); dup.seq=maxSeq(trail)+1; addChild(trail,null,dup); g.members.push(dup.id); saveLocal(key,trail); renderLeft(); });
               row.find('.tmp-trash').on('click', function(ev){ ev.stopPropagation(); removeNode(trail,n.id); Object.keys(trail.groups||{}).forEach(function(g2){ var m=trail.groups[g2].members||[]; trail.groups[g2].members=m.filter(function(x){return x!==n.id;}); }); saveLocal(key,trail); if(ui.active===n.id) ui.active=null; renderLeft(); renderRight(); });
               list.append(row);
+            });
+            // enable DnD sorting for this group's list
+            wireDnD(list, function(){
+              return list.find('.tmp-node').map(function(){ return $(this).data('id'); }).get();
             });
             ui.left.append(list);
           }
@@ -294,7 +359,7 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
           '<input class="tmp-input" data-a="name" placeholder="Step name" value="'+(n.name||'')+'"/></div>'
         );
 
-        // NEW: group picker for this step
+        // group picker for step
         var currentG = stepGroupOf(trail, n.id) || '__ungrouped';
         var gp = $('<div class="tmp-section"></div>');
         var selHtml = '<label class="tmp-small" style="display:block;margin:8px 0 4px">Group</label>'+
@@ -312,7 +377,6 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
           var gid = this.value;
           moveStepToGroup(trail, n.id, gid);
           saveLocal(key, trail);
-          // Keep current filter if possible; refresh left to update counts/membership.
           renderLeft();
         });
 
@@ -366,7 +430,7 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
           else if(ui.filter)           seq = membersBySeq(trail, (trail.groups[ui.filter]||{members:[]}).members);
           else                         seq = flatBySeq(trail);
 
-          // quiet the auto-recorder while replaying the chain
+          // stop the auto-recorder while replaying the chain
           var totalQuiet = (layout.props.replayQuietMs||1200) * (seq.length+1);
           ui.replayQuietUntil = Date.now() + totalQuiet;
 
