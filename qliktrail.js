@@ -63,6 +63,31 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
              .sort(function(a,b){ return (a.seq||0)-(b.seq||0); });
   }
 
+  // NEW: find which group a step belongs to
+  function stepGroupOf(tr, stepId){
+    var found = null;
+    Object.keys(tr.groups||{}).some(function(gid){
+      var mem = tr.groups[gid].members || [];
+      if (mem.indexOf(stepId) !== -1){ found = gid; return true; }
+      return false;
+    });
+    return found; // null => ungrouped
+  }
+  // NEW: move a step to a group (or ungrouped when gid===null or '__ungrouped')
+  function moveStepToGroup(tr, stepId, gid){
+    // remove from all groups first
+    Object.keys(tr.groups||{}).forEach(function(g){
+      var mem = tr.groups[g].members || [];
+      tr.groups[g].members = mem.filter(function(id){ return id !== stepId; });
+    });
+    if (gid && gid !== '__ungrouped'){
+      tr.groups[gid] = tr.groups[gid] || { id:gid, name:gid, members:[] };
+      if (tr.groups[gid].members.indexOf(stepId) === -1){
+        tr.groups[gid].members.push(stepId);
+      }
+    }
+  }
+
   // selection capture / replay
   function getSelectionsGroupedByState(){
     return new Promise(function(resolve){
@@ -262,7 +287,36 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
         var n=findNode(trail, ui.active);
         if(!n){ ui.tb.find('[data-a="del"]').prop('disabled', true); return; }
         ui.tb.find('[data-a="del"]').prop('disabled', false);
-        ui.right.append('<div><span class="tmp-badge">main</span> <input class="tmp-input" data-a="name" placeholder="Step name" value="'+(n.name||'')+'"/></div>');
+
+        // header + name
+        ui.right.append(
+          '<div><span class="tmp-badge">main</span> '+
+          '<input class="tmp-input" data-a="name" placeholder="Step name" value="'+(n.name||'')+'"/></div>'
+        );
+
+        // NEW: group picker for this step
+        var currentG = stepGroupOf(trail, n.id) || '__ungrouped';
+        var gp = $('<div class="tmp-section"></div>');
+        var selHtml = '<label class="tmp-small" style="display:block;margin:8px 0 4px">Group</label>'+
+                      '<select class="tmp-select" data-a="stepGroup" style="min-width:220px">'+
+                      '<option value="__ungrouped">Ungrouped</option>';
+        Object.keys(trail.groups||{}).forEach(function(gid){
+          var name = trail.groups[gid].name || gid;
+          selHtml += '<option value="'+gid+'">'+name+'</option>';
+        });
+        selHtml += '</select>';
+        gp.append(selHtml);
+        ui.right.append(gp);
+        ui.right.find('[data-a="stepGroup"]').val(currentG);
+        ui.right.find('[data-a="stepGroup"]').on('change', function(){
+          var gid = this.value;
+          moveStepToGroup(trail, n.id, gid);
+          saveLocal(key, trail);
+          // Keep current filter if possible; refresh left to update counts/membership.
+          renderLeft();
+        });
+
+        // snapshot view
         var snap=n.snapshot||{states:[]};
         var box=$('<div class="tmp-step"><b>Snapshot</b></div>');
         (snap.states||[]).forEach(function(st){
@@ -277,6 +331,8 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
           box.append(s);
         });
         ui.right.append(box);
+
+        // actions
         var act=$('<div class="tmp-footer"><button class="tmp-btn" data-a="replay">Replay to here</button></div>');
         ui.right.append(act);
         ui.right.find('[data-a="name"]').on('change', function(){ n.name=this.value; saveLocal(key,trail); renderLeft(); });
@@ -335,7 +391,7 @@ define(['qlik','jquery','./properties','text!./style.css'], function(qlik, $, pr
           var name=prompt('Group name','New group'); if(!name) return;
           var gid='g_'+Math.random().toString(36).slice(2,7);
           trail.groups[gid]={ id:gid, name:name, members:[] };
-          saveLocal(key,trail); renderFilter(); renderLeft();
+          saveLocal(key,trail); renderFilter(); renderLeft(); renderRight();
         });
 
         // export / import
